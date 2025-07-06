@@ -12,9 +12,6 @@ export default defineConfig(({ mode }) => {
   const STOREFRONT_URL =
     env.VITE_MEDUSA_STOREFRONT_URL || "http://localhost:8000"
 
-  /**
-   * Add this to your .env file to specify the project to load admin extensions from.
-   */
   const MEDUSA_PROJECT = env.VITE_MEDUSA_PROJECT || null
   const sources = MEDUSA_PROJECT ? [MEDUSA_PROJECT] : []
 
@@ -32,7 +29,14 @@ export default defineConfig(({ mode }) => {
       __STOREFRONT_URL__: JSON.stringify(STOREFRONT_URL),
     },
     server: {
-      open: true,
+      host: '0.0.0.0', // Allow external connections for VSCode port forwarding
+      port: 5173,
+      strictPort: true, // Fail if port is already in use
+      open: false, // Don't auto-open browser in remote dev
+      // Configure for VSCode remote development
+      hmr: {
+        port: 24678, // Use a different port for HMR to avoid conflicts
+      },
     },
   }
 })
