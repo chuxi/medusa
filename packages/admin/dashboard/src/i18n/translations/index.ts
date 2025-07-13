@@ -88,7 +88,10 @@ export default {
   ar: {
     translation: ar,
   },
-  zhCN: {
+  zh_CN: {
+    translation: zhCN,
+  },
+  zh: {
     translation: zhCN,
   },
   fa: {

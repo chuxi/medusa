@@ -1,6 +1,6 @@
-import { PencilSquare, Trash } from "@medusajs/icons"
+import { ArrowDownTray, ArrowUpTray, Loader, PencilSquare, Text, Trash, TruckFast } from "@medusajs/icons"
 import { HttpTypes } from "@medusajs/types"
-import { Container, Heading, StatusBadge, usePrompt } from "@medusajs/ui"
+import { Container, Heading, StatusBadge, toast, Toaster, usePrompt } from "@medusajs/ui"
 import { useTranslation } from "react-i18next"
 import { useNavigate } from "react-router-dom"
 
@@ -8,6 +8,11 @@ import { ActionMenu } from "../../../../../components/common/action-menu"
 import { SectionRow } from "../../../../../components/common/section"
 import { useDeleteProduct } from "../../../../../hooks/api/products"
 import { useExtension } from "../../../../../providers/extension-provider"
+import { useMutation, useQuery } from "@tanstack/react-query"
+import { sdk } from "../../../../../lib/client"
+import { queryClient } from "../../../../../lib/query-client"
+import { useEffect, useState } from "react"
+
 
 const productStatusColor = (status: string) => {
   switch (status) {
@@ -40,6 +45,108 @@ export const ProductGeneralSection = ({
 
   const { mutateAsync } = useDeleteProduct(product.id)
 
+  const [isTransforming, setTransforming] = useState(false)
+  const [isTransformed, setTransformed] = useState(!!product.metadata?.["images_translated"])
+
+  const productQuery = useQuery({
+    queryFn: () => sdk.admin.product.retrieve(product.id, {
+      fields: "metadata",
+    }),
+    queryKey: ["products", "detail", product.id],
+    enabled: isTransforming,
+    refetchInterval: (query) => !query.state.data?.product.metadata?.["images_translated"] ? 5000 : false,
+    refetchIntervalInBackground: true,
+  })
+
+  useEffect(() => {
+    if (isTransforming && !!productQuery.data?.product.metadata?.["images_translated"]) {
+      setTransformed(true)
+      setTransforming(false)
+      toast.success("Success", {
+        description: "格式转换成功"
+      })
+    }
+  }, [productQuery.data])
+
+  const { mutateAsync: transformAction } = useMutation({
+    mutationFn: () => {
+      return sdk.client.fetch(
+        `/admin/ruten/product/${product.id}/transform`,
+        { method: "POST", }
+      )
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["products", "detail", product.id] })
+      setTransforming(true)
+      toast.success("Loading", {
+        description: "格式转换任务已提交",
+        duration: 3000,
+      })
+    },
+    onError: (error) => {
+      // setTransforming(false)
+      toast.error("Error", {
+        description: `格式转换失败: ${error}`,
+      })
+    }
+  })
+
+  // 发布商品到露天的 mutation
+  const { mutateAsync: publishAction } = useMutation({
+    mutationFn: () => sdk.client.fetch(
+      `/admin/ruten/product/${product.id}/push`,
+      { method: "POST" }
+    ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["products", "detail", product.id] })
+      toast.success("Success", {
+        description: "商品已成功发布到露天",
+        duration: 3000,
+      })
+    },
+    onError: (error) => {
+      toast.error("Error", {
+        description: `商品发布失败: ${error}`,
+        duration: 6000,
+      })
+    }
+  })
+
+  const { mutateAsync: putOnlineAction } = useMutation({
+    mutationFn: () => {
+      if (product.status === "proposed") {
+        return sdk.client.fetch(
+          `/admin/ruten/product/${product.id}/online`,
+          { method: "POST", }
+        )
+      } else if (product.status === "published") {
+        return sdk.client.fetch(
+          `/admin/ruten/product/${product.id}/offline`,
+          { method: "POST", }
+        )
+      }
+      return Promise.resolve()
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["products", "detail", product.id],
+      })
+    },
+    onError: (error) => {
+      if (product.status === "proposed") {
+        toast.error("Error", {
+          description: `商品上架失败: ${error}`,
+          duration: 6000,
+        })
+      } else if (product.status === "published") {
+        toast.error("Error", {
+          description: `商品下架失败: ${error}`,
+          duration: 6000,
+        })
+      }
+    }
+  })
+
   const handleDelete = async () => {
     const res = await prompt({
       title: t("general.areYouSure"),
@@ -61,6 +168,8 @@ export const ProductGeneralSection = ({
     })
   }
 
+  const transformStatus = isTransforming ? ( <Loader /> ) : isTransformed ? (<Text color="green" />) : (<Text />)
+
   return (
     <Container className="divide-y p-0">
       <div className="flex items-center justify-between px-6 py-4">
@@ -79,6 +188,32 @@ export const ProductGeneralSection = ({
                     icon: <PencilSquare />,
                   },
                 ],
+              },
+              {
+                actions: [
+                  {
+                    label: "格式转换",
+                    onClick: transformAction,
+                    icon: transformStatus,
+                  },
+                  {
+                    label: t("actions.publish"),
+                    onClick: publishAction,
+                    icon: <TruckFast />,
+                  },
+                  {
+                    label: "上架",
+                    disabled: product.status !== "proposed",
+                    onClick: putOnlineAction,
+                    icon: <ArrowUpTray />,
+                  },
+                  {
+                    label: "下架",
+                    disabled: product.status !== "published",
+                    onClick: putOnlineAction,
+                    icon: <ArrowDownTray />,
+                  },
+                ]
               },
               {
                 actions: [
