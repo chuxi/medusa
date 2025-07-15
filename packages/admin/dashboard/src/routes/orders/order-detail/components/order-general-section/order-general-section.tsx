@@ -59,7 +59,7 @@ export const OrderGeneralSection = ({ order }: OrderGeneralSectionProps) => {
   useEffect(() => {
     const checkOrderStatus = async () => {
       try {
-        const response = await fetch(`/admin/ruten/order/${order.id}/check_ruten_order_status`, {
+        const response = await fetch(`/admin/ruten/order/${order.id}/ruten_order_status`, {
           method: "GET",
           credentials: 'include',
         })
