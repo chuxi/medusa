@@ -126,9 +126,14 @@ export const OrderGeneralSection = ({ order }: OrderGeneralSectionProps) => {
       })
       
       if (response.ok) {
-        toast.success("订单取消申请已提交")
-        setShowCancelSelect(false)
-        setCancelReason("")
+        const data = await response.json()
+        if (data.success === true) {
+          toast.success("订单取消申请已提交")
+          setShowCancelSelect(false)
+          setCancelReason("")
+        } else {
+          toast.error(`取消订单申请失败: ${data.failed_reason}`)
+        }
       } else {
         toast.error(`取消订单申请失败: ${response.status} ${response.statusText}`)
       }
