@@ -7,13 +7,14 @@ import {
   StatusBadge,
   Text,
   toast,
-  usePrompt,
   Button,
   Select,
+  Drawer,
+  Input,
+  Label,
 } from "@medusajs/ui"
 import { useTranslation } from "react-i18next"
 import { ActionMenu } from "../../../../../components/common/action-menu"
-import { useCancelOrder } from "../../../../../hooks/api/orders"
 import { useDate } from "../../../../../hooks/use-date"
 import {
   getCanceledOrderStatus,
@@ -21,13 +22,17 @@ import {
   getOrderPaymentStatus,
 } from "../../../../../lib/order-helpers"
 import { useState, useEffect } from "react"
+import { sdk } from "../../../../../lib/client"
+import { useMutation } from "@tanstack/react-query"
+import { queryClient } from "../../../../../lib/query-client"
+import { ordersQueryKeys } from "../../../../../hooks/api"
 
 type OrderGeneralSectionProps = {
   order: HttpTypes.AdminOrder
 }
 
 // 不同意的理由选项
-const disagreeReasons = [
+const rejectCancelReasons = [
   { value: "ITEM_IN_PRODUCTION", label: "商品制作中" },
   { value: "ITEM_PURCHASED_OR_SHIPPING", label: "商品已代购完成或运送中" },
   { value: "ITEM_SHIPPED", label: "商品已出货" },
@@ -36,7 +41,7 @@ const disagreeReasons = [
 ]
 
 // 取消订单的理由选项
-const sellerCancelReasons = [
+const applyCancelReasons = [
   { value: "ITEM_DEFECTIVE_OR_LOST", label: "有瑕疵或已遗失无法进行交易" },
   { value: "BUYER_UNREACHABLE", label: "无法联系上买家或买家不回应" },
   { value: "ORDER_CANCELLED_BY_AGREEMENT", label: "双方协调决定取消交易" },
@@ -46,333 +51,373 @@ const sellerCancelReasons = [
 
 export const OrderGeneralSection = ({ order }: OrderGeneralSectionProps) => {
   const { t } = useTranslation()
-  const prompt = usePrompt()
   const { getFullDate } = useDate()
-  const [disagreeReason, setDisagreeReason] = useState<string>("")
-  const [showDisagreeSelect, setShowDisagreeSelect] = useState(false)
-  const [cancelReason, setCancelReason] = useState<string>("")
-  const [showCancelSelect, setShowCancelSelect] = useState(false)
-  const [showBuyerCancelRequireAction, setShowBuyerCancelRequireAction] = useState(false)
-  const { mutateAsync: cancelOrder } = useCancelOrder(order.id)
+  const [rejectCancelReason, setRejectCancelReason] = useState<string>("")
+  const [showRejectCancelDrawer, setShowRejectCancelDrawer] = useState(false)
+  const [applyCancelReason, setApplyCancelReason] = useState<string>("")
+  const [showApplyCancelDrawer, setShowApplyCancelDrawer] = useState(false)
+  const [isBuyerApplyCancelOrder, setBuyerApplyCancelOrder] = useState(false)
+  const [otherReason, setOtherReason] = useState("")
+
+  // Select 开关状态控制
+  const [applyCancelSelectOpen, setApplyCancelSelectOpen] = useState(false)
+  const [rejectCancelSelectOpen, setRejectCancelSelectOpen] = useState(false)
+
+  const orderWithRutenStatus = order as HttpTypes.AdminOrder & {
+    ruten_order: {
+      status: string,
+      metadata: Record<string, unknown>,
+    },
+    canceled_at: Date | string
+  }
+
+  // 处理打开 Drawer 的方法，确保焦点正确转移
+  const handleOpenApplyCancelDrawer = () => {
+    // 使用 requestAnimationFrame 确保 ActionMenu 关闭后再打开 Drawer
+    requestAnimationFrame(() => {
+      setShowApplyCancelDrawer(true)
+    })
+  }
+
+  const handleOpenRejectCancelDrawer = () => {
+    // 使用 requestAnimationFrame 确保 ActionMenu 关闭后再打开 Drawer
+    requestAnimationFrame(() => {
+      setShowRejectCancelDrawer(true)
+    })
+  }
 
   // 检查订单状态
   useEffect(() => {
-    const checkOrderStatus = async () => {
-      try {
-        const response = await fetch(`/admin/ruten/order/${order.id}/ruten_order_status`, {
-          method: "GET",
-          credentials: 'include',
-        })
-        
-        if (response.ok) {
-          const contentType = response.headers.get("content-type")
-          if (contentType && contentType.includes("application/json")) {
-            const data = await response.json()
-            if (data.success === true) {
-              if (order.status === "requires_action" && data.data.ruten_order_status === "InCancel") {
-                setShowBuyerCancelRequireAction(true)
-              } else {
-                setShowBuyerCancelRequireAction(false)
-              }
-            }
-          } else {
-            console.warn("API返回的不是JSON格式:", response.status, response.statusText)
-            setShowBuyerCancelRequireAction(false)
-          }
-        } else {
-          console.warn("API请求失败:", response.status, response.statusText)
-          setShowBuyerCancelRequireAction(false)
-        }
-      } catch (error) {
-        console.error("检查订单状态失败:", error)
-      }
+    const rutenOrderIsInCancel = orderWithRutenStatus.ruten_order.status.toUpperCase() === "INCANCEL"
+    const orderIsCanceledBySeller = orderWithRutenStatus.metadata?.["cancel_by"] === "seller"
+    if (order.status === "requires_action" && rutenOrderIsInCancel && !orderIsCanceledBySeller) {
+      setBuyerApplyCancelOrder(true)
     }
-
-    checkOrderStatus()
   }, [order.id, order.status])
 
-  const handleCancel = async () => {
-    const res = await prompt({
-      title: t("general.areYouSure"),
-      description: t("orders.cancelWarning", {
-        id: `#${order.display_id}`,
-      }),
-      confirmText: t("actions.continue"),
-      cancelText: t("actions.cancel"),
-    })
-
-    if (!res) {
-      return
-    }
-
-    // 用户确认取消，显示选择取消理由的界面
-    setShowCancelSelect(true)
-  }
-
-  const handleCancelConfirm = async () => {
-    if (!cancelReason) {
-      toast.error("请选择取消订单的理由")
-      return
-    }
-
-    try {
-      const response = await fetch(`/admin/ruten/order/${order.id}/seller_cancel_order`, {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify({cancel_reason: cancelReason}),
-      })
-      
-      if (response.ok) {
-        const data = await response.json()
-        if (data.success === true) {
-          toast.success("订单取消申请已提交")
-          setShowCancelSelect(false)
-          setCancelReason("")
-        } else {
-          toast.error(`取消订单申请失败: ${data.failed_reason}`)
-        }
-      } else {
-        toast.error(`取消订单申请失败: ${response.status} ${response.statusText}`)
+  const { mutateAsync: handleApplyCancel, isPending: isApplyCancelPending } = useMutation({
+    mutationFn: () => {
+      // 验证"其他原因"的长度
+      if (applyCancelReason === "OTHER_REASON" && (!otherReason.trim() || otherReason.trim().length < 2)) {
+        throw new Error("其他原因至少需要输入2个字符")
       }
-    } catch (error) {
-      toast.error("网络错误，请重试")
-    }
-    setShowCancelSelect(false)
-  }
 
-  const handleCancelReasonChange = (value: string) => {
-    setCancelReason(value)
-  }
-
-  const handleAgree = async () => {
-    setShowDisagreeSelect(false)
-    try {
-      const response = await fetch(`/admin/ruten/order/${order.id}/buyer_cancel_order_seller_response`, {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify({agree: true}),
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        if (data.success === true) {
-          toast.success("同意取消订单成功")
-          setShowDisagreeSelect(false)
-          setDisagreeReason("")
-        } else {
-          if (data.failed_reason) {
-            toast.error("同意取消订单失败: " + data.failed_reason)
-          } else {
-            toast.error("同意取消订单失败")
-          }
-        }
-      } else {
-        toast.error(`同意取消订单失败: ${response.status} ${response.statusText}`)
-      }
-    } catch (error) {
-      toast.error("网络错误，请重试")
-    }
-  }
-
-  const handleDisagree = async () => {
-    if (!showDisagreeSelect) {
-      // 第一次点击，显示下拉框
-      setShowDisagreeSelect(true)
-    } else if (disagreeReason) {
-      try {
-        const response = await fetch(`/admin/ruten/order/${order.id}/buyer_cancel_order_seller_response`, {
+      return sdk.client.fetch(
+        `/admin/ruten/order/${order.id}/apply_cancel`,
+        {
           method: "POST",
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          credentials: 'include',
-          body: JSON.stringify({
-            agree: false,
-            cancel_order_reject: {
-              reject_reason_type: disagreeReason,
-            }
-          }),
-        })
-  
-        if (response.ok) {
-          const data = await response.json()
-          if (data.success === true) {
-            toast.success("拒绝取消订单成功")
-            setShowDisagreeSelect(false)
-            setDisagreeReason("")
-          } else {
-            if (data.failed_reason) {
-              toast.error("拒绝取消订单失败: " + data.failed_reason)
-            } else {
-              toast.error("拒绝取消订单失败")
-            }
+          body: {
+            cancel_reason_type: applyCancelReason,
+            other_reason: applyCancelReason === "OTHER_REASON" ? otherReason.trim() : undefined
           }
-        } else {
-          toast.error(`拒绝取消订单失败: ${response.status} ${response.statusText}`)
         }
-      } catch (error) {
-        toast.error("网络错误，请重试")
-      }
-    } else {
-      // 显示下拉框但未选择理由
-      toast.error("请选择不同意的理由")
+      )
+    },
+    onSuccess: () => {
+      toast.success("申请取消订单成功")
+      // 使订单查询失效，重新获取最新状态
+      queryClient.invalidateQueries({
+        queryKey: ordersQueryKeys.detail(order.id)
+      })
+    },
+    onError: (error) => {
+      toast.error(`申请取消订单失败： ${error.message}`)
     }
-  }
+  })
 
-  const handleDisagreeReasonChange = (value: string) => {
-    setDisagreeReason(value)
-  }
+  const { mutateAsync: handleRejectCancel, isPending: isRejectCancelPending } = useMutation({
+    mutationFn: () => {
+      // 验证"其他原因"的长度
+      if (rejectCancelReason === "OTHER_REASON" && (!otherReason.trim() || otherReason.trim().length < 5)) {
+        throw new Error("其他原因至少需要输入5个字符")
+      }
+
+      return sdk.client.fetch(
+        `/admin/ruten/order/${order.id}/reject_cancel`,
+        {
+          method: "POST",
+          body: {
+            reject_reason_type: rejectCancelReason,
+            other_reason: rejectCancelReason === "OTHER_REASON" ? otherReason.trim() : undefined
+          }
+        }
+      )
+    },
+    onSuccess: () => {
+      toast.success("拒绝取消订单成功")
+      setBuyerApplyCancelOrder(false)
+      // 使订单查询失效，重新获取最新状态
+      queryClient.invalidateQueries({ queryKey: ["orders", "detail", order.id] })
+    },
+    onError: (error) => {
+      toast.error(`拒绝取消订单失败： ${error.message}`)
+    }
+  })
+
+
+  const { mutateAsync: handleAgreeCancel, isPending: isAgreeCancelPending } = useMutation({
+    mutationFn: () => {
+      return sdk.client.fetch(
+        `/admin/ruten/order/${order.id}/agree_cancel`,
+        { method: "POST" }
+      )
+    },
+    onSuccess: () => {
+      toast.success("同意取消订单成功")
+      setBuyerApplyCancelOrder(false)
+      // 使订单查询失效，重新获取最新状态
+      queryClient.invalidateQueries({ queryKey: ["orders", "detail", order.id] })
+    },
+    onError: (error) => {
+      toast.error(`同意取消订单失败： ${error.message}`)
+    }
+  })
 
   return (
     <>
       <Container className="flex items-center justify-between px-6 py-4">
-      <div>
-        <div className="flex items-center gap-x-1">
-          <Heading>#{order.display_id}</Heading>
-          <Copy content={`#${order.display_id}`} className="text-ui-fg-muted" />
-        </div>
-        <Text size="small" className="text-ui-fg-subtle">
-          {t("orders.onDateFromSalesChannel", {
-            date: getFullDate({ date: order.created_at, includeTime: true }),
-            salesChannel: order.sales_channel?.name,
-          })}
-        </Text>
-      </div>
-      <div className="flex items-center gap-x-4">
-        <div className="flex items-center gap-x-1.5">
-          <OrderBadge order={order} />
-          <PaymentBadge order={order} />
-          <FulfillmentBadge order={order} />
-        </div>
-        <ActionMenu
-          groups={[
-            {
-              actions: [
-                {
-                  label: "申请取消订单",
-                  onClick: handleCancel,
-                  disabled: !!order.canceled_at,
-                  icon: <XCircle />,
-                },
-              ],
-            },
-          ]}
-        />
-      </div>
-    </Container>
-      
-      {/* 新增的Require Action行 */}
-      {showBuyerCancelRequireAction && (
-        <Container className="flex items-center justify-between px-6 py-4 border-t">
-          <div>
-            <Text className="font-medium">Require Action: 用户请求取消订单</Text>
+        <div>
+          <div className="flex items-center gap-x-1">
+            <Heading>#{order.display_id}</Heading>
+            <Copy content={`#${order.display_id}`} className="text-ui-fg-muted" />
+            {isBuyerApplyCancelOrder && (
+              <StatusBadge color="orange" className="ml-2">
+                买家申请取消
+              </StatusBadge>
+            )}
           </div>
-          <div className="flex items-center gap-x-2">
-            {showDisagreeSelect ? (
-              <div className="flex items-center gap-x-2 p-3 border border-ui-border-base rounded-md bg-ui-bg-subtle">
-                <Select
-                  value={disagreeReason}
-                  onValueChange={handleDisagreeReasonChange}
-                  size="small"
+          <Text size="small" className="text-ui-fg-subtle">
+            {t("orders.onDateFromSalesChannel", {
+              date: getFullDate({ date: order.created_at, includeTime: true }),
+              salesChannel: order.sales_channel?.name,
+            })}
+          </Text>
+        </div>
+        <div className="flex items-center gap-x-4">
+          <div className="flex items-center gap-x-1.5">
+            <OrderBadge order={order} />
+            <PaymentBadge order={order} />
+            <FulfillmentBadge order={order} />
+          </div>
+          <ActionMenu
+            groups={[
+              {
+                actions: isBuyerApplyCancelOrder ? [
+                  // 当买家申请取消订单时显示的操作
+                  {
+                    label: "同意取消订单",
+                    onClick: handleAgreeCancel,
+                    disabled: isAgreeCancelPending,
+                    icon: <XCircle />,
+                  },
+                  {
+                    label: "拒绝取消订单",
+                    onClick: handleOpenRejectCancelDrawer,
+                    disabled: isRejectCancelPending,
+                    icon: <XCircle />,
+                  },
+                ] : [
+                  // 正常状态下显示的操作
+                  {
+                    label: "申请取消订单",
+                    onClick: handleOpenApplyCancelDrawer,
+                    disabled: !!orderWithRutenStatus.canceled_at || isApplyCancelPending || order.status === "completed",
+                    icon: <XCircle />,
+                  },
+                ],
+              },
+            ]}
+          />
+        </div>
+      </Container>
+
+      {/* 申请取消订单弹窗 */}
+      <Drawer
+        open={showApplyCancelDrawer}
+        onOpenChange={setShowApplyCancelDrawer}
+      >
+        <Drawer.Content>
+          <Drawer.Header>
+            <Drawer.Title>申请取消订单</Drawer.Title>
+            <Drawer.Description>
+              请选择取消订单的理由，提交后将向买家发送取消申请。
+            </Drawer.Description>
+          </Drawer.Header>
+          <Drawer.Body className="space-y-4">
+            <div className="space-y-2">
+              <Label className="font-medium">取消理由</Label>
+              <Select
+                value={applyCancelReason}
+                onValueChange={(value) => {
+                  setApplyCancelReason(value)
+                  if (value !== "OTHER_REASON") {
+                    setOtherReason("")
+                  }
+                }}
+                open={applyCancelSelectOpen}
+                onOpenChange={setApplyCancelSelectOpen}
+              >
+                <Select.Trigger>
+                  <Select.Value placeholder="请选择取消订单的理由" />
+                </Select.Trigger>
+                <Select.Content
+                  position="popper"
+                  side="bottom"
+                  align="start"
+                  sideOffset={4}
                 >
-                  <Select.Trigger className="w-40">
-                    <Select.Value placeholder="选择理由" />
-                  </Select.Trigger>
-                  <Select.Content>
-                    {disagreeReasons.map((reason) => (
-                      <Select.Item key={reason.value} value={reason.value}>
-                        {reason.label}
-                      </Select.Item>
-                    ))}
-                  </Select.Content>
-                </Select>
-                <Button
-                  variant="danger"
-                  size="small"
-                  onClick={handleDisagree}
-                >
-                  确认拒绝
-                </Button>
-                <Button
-                  variant="transparent"
-                  size="small"
-                  onClick={() => {
-                    setShowDisagreeSelect(false)
-                    setDisagreeReason("")
-                  }}
-                >
-                  取消
-                </Button>
+                  {applyCancelReasons.map((reason) => (
+                    <Select.Item key={reason.value} value={reason.value}>
+                      {reason.label}
+                    </Select.Item>
+                  ))}
+                </Select.Content>
+              </Select>
+            </div>
+            {applyCancelReason === "OTHER_REASON" && (
+              <div className="space-y-2">
+                <Label className="font-medium">请详细说明理由</Label>
+                <Input
+                  value={otherReason}
+                  onChange={(e) => setOtherReason(e.target.value)}
+                  placeholder="请输入具体的取消理由..."
+                  maxLength={100}
+                  minLength={2}
+                />
+                <Text size="small" className="text-ui-fg-subtle">
+                  最少2个字符，最多100个字符 ({otherReason.length}/100)
+                </Text>
               </div>
-            ) : (
+            )}
+          </Drawer.Body>
+          <Drawer.Footer>
+            <div className="flex items-center gap-x-2">
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setShowApplyCancelDrawer(false)
+                  setApplyCancelReason("")
+                  setOtherReason("")
+                }}
+                disabled={isApplyCancelPending}
+              >
+                取消
+              </Button>
               <Button
                 variant="danger"
-                size="small"
-                onClick={handleDisagree}
+                onClick={() => handleApplyCancel().then(() => {
+                  // 成功后关闭 Drawer 并重置状态
+                  setShowApplyCancelDrawer(false)
+                  setApplyCancelReason("")
+                  setOtherReason("")
+                })}
+                disabled={
+                  !applyCancelReason ||
+                  (applyCancelReason === "OTHER_REASON" && (!otherReason.trim() || otherReason.trim().length < 2)) ||
+                  isApplyCancelPending
+                }
+                isLoading={isApplyCancelPending}
               >
-                不同意
+                {isApplyCancelPending ? "提交中..." : "确认申请取消"}
               </Button>
-            )}
-            <Button
-              variant="primary"
-              size="small"
-              onClick={handleAgree}
-            >
-              同意
-            </Button>
-          </div>
-        </Container>
-      )}
+            </div>
+          </Drawer.Footer>
+        </Drawer.Content>
+      </Drawer>
 
-      {/* 取消订单理由选择区域 */}
-      {showCancelSelect && (
-        <Container className="flex items-center justify-between px-6 py-4 border-t">
-          <div>
-            <Text className="font-medium">请选择取消订单的理由</Text>
-          </div>
-          <div className="flex items-center gap-x-2 p-3 border border-ui-border-base rounded-md bg-ui-bg-subtle">
-            <Select
-              value={cancelReason}
-              onValueChange={handleCancelReasonChange}
-              size="small"
-            >
-              <Select.Trigger className="w-40">
-                <Select.Value placeholder="选择理由" />
-              </Select.Trigger>
-              <Select.Content>
-                {sellerCancelReasons.map((reason) => (
-                  <Select.Item key={reason.value} value={reason.value}>
-                    {reason.label}
-                  </Select.Item>
-                ))}
-              </Select.Content>
-            </Select>
-            <Button
-              variant="danger"
-              size="small"
-              onClick={handleCancelConfirm}
-            >
-              确认取消
-            </Button>
-            <Button
-              variant="transparent"
-              size="small"
-              onClick={() => {
-                setShowCancelSelect(false)
-                setCancelReason("")
-              }}
-            >
-              取消
-            </Button>
-          </div>
-        </Container>
-      )}
+      {/* 拒绝取消订单弹窗 */}
+      <Drawer
+        open={showRejectCancelDrawer}
+        onOpenChange={setShowRejectCancelDrawer}
+      >
+        <Drawer.Content>
+          <Drawer.Header>
+            <Drawer.Title>拒绝取消订单</Drawer.Title>
+            <Drawer.Description>
+              请选择拒绝买家取消订单申请的理由。
+            </Drawer.Description>
+          </Drawer.Header>
+          <Drawer.Body className="space-y-4">
+            <div className="space-y-2">
+              <Label className="font-medium">拒绝理由</Label>
+              <Select
+                value={rejectCancelReason}
+                onValueChange={(value) => {
+                  setRejectCancelReason(value)
+                  if (value !== "OTHER_REASON") {
+                    setOtherReason("")
+                  }
+                }}
+                open={rejectCancelSelectOpen}
+                onOpenChange={setRejectCancelSelectOpen}
+              >
+                <Select.Trigger>
+                  <Select.Value placeholder="请选择拒绝的理由" />
+                </Select.Trigger>
+                <Select.Content
+                  position="popper"
+                  side="bottom"
+                  align="start"
+                  sideOffset={4}
+                >
+                  {rejectCancelReasons.map((reason) => (
+                    <Select.Item key={reason.value} value={reason.value}>
+                      {reason.label}
+                    </Select.Item>
+                  ))}
+                </Select.Content>
+              </Select>
+            </div>
+            {rejectCancelReason === "OTHER_REASON" && (
+              <div className="space-y-2">
+                <Label className="font-medium">请详细说明理由</Label>
+                <Input
+                  value={otherReason}
+                  onChange={(e) => setOtherReason(e.target.value)}
+                  placeholder="请输入具体的拒绝理由..."
+                  maxLength={100}
+                  minLength={2}
+                />
+                <Text size="small" className="text-ui-fg-subtle">
+                  最少2个字符，最多100个字符 ({otherReason.length}/100)
+                </Text>
+              </div>
+            )}
+          </Drawer.Body>
+          <Drawer.Footer>
+            <div className="flex items-center gap-x-2">
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setShowRejectCancelDrawer(false)
+                  setRejectCancelReason("")
+                  setOtherReason("")
+                }}
+                disabled={isRejectCancelPending}
+              >
+                取消
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => handleRejectCancel().finally(() => {
+                  // 成功后关闭 Drawer 并重置状态
+                  setShowRejectCancelDrawer(false)
+                  setRejectCancelReason("")
+                  setOtherReason("")
+                })}
+                disabled={
+                  !rejectCancelReason ||
+                  (rejectCancelReason === "OTHER_REASON" && (!otherReason.trim() || otherReason.trim().length < 2)) ||
+                  isRejectCancelPending
+                }
+                isLoading={isRejectCancelPending}
+              >
+                {isRejectCancelPending ? "提交中..." : "确认拒绝"}
+              </Button>
+            </div>
+          </Drawer.Footer>
+        </Drawer.Content>
+      </Drawer>
     </>
   )
 }

@@ -2928,6 +2928,7 @@
     "account": "账户",
     "total": "订单总额",
     "paidTotal": "已收金额",
+    "creditTotal": "信用总额",
     "totalExclTax": "不含税总额",
     "subtotal": "小计",
     "shipping": "配送",
